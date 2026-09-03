@@ -27,9 +27,17 @@ The BMMA probe proves and measures the otherwise poorly surfaced 1-bit Tensor Co
 Requirements:
 
 1. NVIDIA driver
-2. CUDA Toolkit 12.x (11.8+ should also work)
-3. Visual Studio 2022 Build Tools with **Desktop development with C++**
-4. CMake 3.24+
+2. Visual Studio / Build Tools with **Desktop development with C++**
+3. CMake 3.24+
+4. A CUDA Toolkit compatible with the installed Visual Studio
+
+Known-good Windows pairs:
+
+- **Visual Studio 2026 / MSVC 19.5x -> CUDA 13.2+**
+- **Visual Studio 2022 / MSVC 19.3x -> CUDA 11.8+**
+- **Visual Studio 2019 / MSVC 19.2x -> CUDA 11.2+**
+
+`run.ps1` scans all installed CUDA versions instead of trusting the first `nvcc.exe` on `PATH`. If Visual Studio 2026 is installed but only an old CUDA Toolkit is present, the bootstrap attempts to install the current `Nvidia.CUDA` package through WinGet. Use `-NoAutoInstall` if you do not want it to modify the machine.
 
 Then:
 
@@ -45,7 +53,7 @@ Or double-click / run:
 run.bat
 ```
 
-The script finds CUDA/CMake, checks Visual Studio, builds **native `sm_86` code only**, then runs the complete benchmark suite.
+The script finds CUDA/CMake, checks Visual Studio compatibility, builds **native `sm_86` code only**, then runs the complete benchmark suite.
 
 Useful examples:
 
@@ -54,6 +62,7 @@ Useful examples:
 .\run.ps1 -BenchArgs "--ternary --m 8192 --k 8192 --iters 100"
 .\run.ps1 -BenchArgs "--bmma --bmma-loops 8192"
 .\run.ps1 -Clean
+.\run.ps1 -NoAutoInstall
 ```
 
 ## Why this exists
