@@ -96,8 +96,6 @@ Shape: M=8192, K=8192. Fixed ternary weights are compiled offline into the exact
 - BMMA/POPC speed ratio: **0.98x**
 - exact CPU-reference correctness: PASS
 
-This is a major recovery from V3: once the model weights are stored in the exact GA102-native fragment layout and weight reuse is correct, BMMA is essentially tied with the best single-token POPC path even though seven of its eight N columns are not useful.
-
 ### Eight-column exact
 
 | Backend | Time | Logical throughput | Physical W rate |
@@ -111,20 +109,13 @@ This is a major recovery from V3: once the model weights are stored in the exact
 - exact CPU-reference correctness: PASS
 - `0.033 / 8 = 0.0041 ms` is an amortized throughput-equivalent number, **not** single-token latency
 
-A useful comparison is eight single-token POPC projections processed sequentially: roughly `8 * 0.040 = 0.320 ms`. The N=8 BMMA kernel performs the eight projections together in **0.033 ms**, about 9.7x less matrix time than that naive sequential path. The fairer weight-reuse software baseline is POPC x8 at 0.210 ms, against which BMMA is 6.36x faster.
-
 ### V4 interpretation
 
-The project now has two distinct best execution modes:
-
-1. **Single-token decode:** POPC and BMMA-native are effectively tied at about 1.6–1.7 TMAC/s for this shape. POPC is simpler; BMMA does not provide a meaningful single-token advantage yet.
-2. **Multi-column / verification work:** BMMA becomes decisively better when all eight native N columns carry useful activation vectors. The fixed-model weight compiler is essential: the same arithmetic in the wrong row-major layout was unusably slow in V3.
-
-V4 intentionally excluded dynamic B-fragment packing from the timed N=8 kernel. V5 therefore starts from raw signed INT8 `[8,K]` activations, packs them on the GPU with warp ballots into the exact BMMA B-fragment layout, and measures pack time, BMMA time, and the combined end-to-end pipeline separately.
+Once the model weights are stored in the exact GA102-native fragment layout and weight reuse is correct, BMMA is essentially tied with the best single-token POPC path even though seven of its eight N columns are not useful. When all eight N columns carry useful activation states, BMMA becomes decisively better.
 
 ## V5 — dynamic INT8 activation pack + BMMA N=8
 
-Shape: M=8192, K=8192, N=8. Input activations are ordinary signed INT8 `[8,K]`. The fixed weights remain in the offline-compiled GA102 BMMA-native layout. A GPU packing kernel uses `__ballot_sync` to create the exact `uint2/lane` B fragments consumed by `m16n8k256`.
+Shape: M=8192, K=8192, N=8. Input activations are ordinary signed INT8 `[8,K]`. A GPU packing kernel uses `__ballot_sync` to create the exact `uint2/lane` B fragments consumed by `m16n8k256`.
 
 | Stage | Time |
 |---|---:|
@@ -138,18 +129,12 @@ Pipeline result:
 - logical throughput: **11,696.3 GMAC/s (11.696 TMAC/s)**
 - activation pack input: 64.0 KiB
 - packed B output: 64.0 KiB
-- isolated pack effective IO: 18.2 GB/s
-- amortized `0.0459/8 = 0.0057 ms` is throughput-equivalent only, not one-token latency
 
-### V5 interpretation and timing caveat
-
-V5 removes the largest artificial advantage from V4: B fragments are no longer prepacked on the CPU. Starting from normal INT8 activation vectors, the exact GPU pipeline still sustains **11.7 TMAC/s** on the synthetic 8192x8192x8 workload.
-
-The isolated timings are not additive in this run: `0.0072 + 0.0455` is larger than the measured sequential pipeline time `0.0459`. Inspection of the source confirms that the pipeline really launches the pack kernel followed by the BMMA kernel in the same default CUDA stream. The discrepancy is therefore attributed to run-state effects such as GPU boost/cache/timing-order variation, not a missing stage. Consequently, the measured **pipeline total and correctness are accepted**, while the printed `15.7% pack share` should not yet be treated as a precise stage decomposition. A hardened benchmark should measure stage boundaries under the same pipeline state and report repeated-run statistics.
+The isolated timings are not additive in this run; the measured pipeline total and correctness are accepted, while the isolated pack-share percentage is not treated as an exact decomposition.
 
 ## V6 — real BitNet b1.58 2B-4T projection shapes
 
-V6 replaces the synthetic 8192x8192 matrix with the actual decoder projection dimensions of `microsoft/bitnet-b1.58-2B-4T`. The fixed runtime fuses Q/K/V into one `3840x2560` projection and gate/up into one `13824x2560` projection. To reduce L2-hot benchmark artifacts, each shape rotates through approximately 64 MiB of equivalent packed weight copies.
+V6 replaces the synthetic 8192x8192 matrix with the actual decoder projection dimensions of `microsoft/bitnet-b1.58-2B-4T`. The fixed runtime fuses Q/K/V into one `3840x2560` projection and gate/up into one `13824x2560` projection. Each shape rotates through approximately 64 MiB of equivalent packed weight copies to reduce permanently-L2-hot artifacts.
 
 All single-token and N=8 results passed exact CPU-reference validation.
 
@@ -160,14 +145,6 @@ All single-token and N=8 results passed exact CPU-reference validation.
 | fused gate+up | 13824x2560 | 8.438 MiB | 0.0234 ms | 1513.2 | 0.0197 ms | 14392.5 |
 | MLP down | 2560x6912 | 4.219 MiB | 0.0168 ms | 1050.2 | 0.0247 ms | 5738.5 |
 
-Matrix-only physical weight-read observations:
-
-- fused QKV single: 180.3 GB/s
-- attention O single: 135.9 GB/s
-- fused gate+up single: 424.4 GB/s
-- MLP down single: 390.8 GB/s
-- N=8 matrix paths vary from 156.9 to 348.7 GB/s for these smaller real shapes
-
 Aggregate decoder-linears result:
 
 - packed ternary W per layer: **16.562 MiB**
@@ -176,14 +153,81 @@ Aggregate decoder-linears result:
 - single-token linear time/layer: **0.0709 ms**
 - single-token 30-layer linears: **2.1265 ms**
 - single-token linear-only ceiling: **470.3 token/s**
-- N=8 linears/layer: **0.0796 ms for 8 states**
 - N=8 30-layer linears: **2.3873 ms for 8 states**
 - N=8 linear-only throughput: **3351.1 states/s**
 
-### V6 interpretation
+These are linear-only ceilings, not full-model generation rates.
 
-V6 is the first benchmark that maps the custom kernels onto the actual model's decoder shapes. The large MLP projections are already relatively close to the memory-throughput regime, while QKV/O are small enough that launch, occupancy and fixed overhead matter much more than the raw 760 GB/s property bandwidth.
+## V7 — remaining decode primitives and BF16 LM head
 
-The **470.3 token/s** number is explicitly a 30-layer ternary-linear ceiling, not end-to-end model throughput. V6 starts from raw signed A8 inputs and includes the dynamic bitplane/B-fragment packing used by the matrix kernels, but it still excludes BF16-to-A8 activation quantization, RMSNorm/subnorms, RoPE, KV-cache attention, ReLU2/gating, residuals, the final norm, tied LM head, sampling and runtime dependencies.
+V7 measures the non-ternary decode pieces separately on the same RTX 3080.
 
-Similarly, **3351.1 states/s** is N=8 linear verification throughput. It must not be interpreted as 3351 autoregressive generated tokens/s.
+Per-token primitive timings included RMSNorm, BF16->A8 quantization, RoPE, ReLU2/gating, residuals and projection postscales. Kept as separate launches, those helpers summed to **0.1167 ms/layer**, or **3.5100 ms across 30 layers**.
+
+The tied BF16 LM head (`128256 x 2560`, 626.250 MiB) achieved:
+
+- correctness: PASS (sampled rows vs CPU BF16 reference)
+- time: **0.9166 ms**
+- effective weight-read rate: **716.4 GB/s**
+- logical throughput: 358.2 GMAC/s
+
+V7 also measured a K+V read-traffic floor across 30 layers. At context 4096 the traffic-only floor was 0.5713 ms at 550.7 GB/s, proving that full attention arithmetic rather than raw KV bytes still needed to be measured.
+
+## V8 — fused support kernels + exact GQA decode attention
+
+V8 combines helper stages that are naturally adjacent in the fixed model and adds exact QK scaling, softmax and weighted-V attention.
+
+Fused support:
+
+| Stage | Time/layer |
+|---|---:|
+| input RMSNorm + A8 quant | 0.0084 ms |
+| QKV postscale + RoPE + KV append | 0.0061 ms |
+| attn subnorm + O-input A8 quant | 0.0138 ms |
+| O postscale + residual + norm + gate A8 | 0.0096 ms |
+| gate/up + ReLU2 + FFN norm + down A8 | 0.0179 ms |
+| down postscale + residual | 0.0066 ms |
+
+Total fused support: **0.0624 ms/layer = 1.8712 ms/30L**, a **1.8758x** improvement over V7's launch-separated 3.5100 ms.
+
+Exact attention correctness: PASS (`head0@128`, max abs error 0.000030; two GPU attention variants agreed exactly at BF16 output resolution).
+
+| Context | Best V8 attention / layer | 30-layer attention | GPU accounting ceiling |
+|---:|---:|---:|---:|
+| 128 | 0.0121 ms | 0.3619 ms | 189.2 tok/s |
+| 512 | 0.0404 ms | 1.2126 ms | 163.0 tok/s |
+| 1024 | 0.0688 ms | 2.0625 ms | 143.2 tok/s |
+| 2048 | 0.1401 ms | 4.2028 ms | 109.6 tok/s |
+| 4096 | 0.3447 ms | 10.3404 ms | 65.5 tok/s |
+
+At context 4096 attention became ~68% of the accounting time, so the next target was context parallelism rather than another ternary GEMV change.
+
+## V9 — split-context exact attention
+
+V9 implements Flash-Decoding-style context splitting with numerically stable softmax composition. Each chunk emits local `(m_i, l_i, O_i)` softmax state and a merge kernel reconstructs the exact full-context result using log-sum-exp scaling. Both split-Q and GQA4 KV-reuse variants were tested at chunk sizes 128/256/512.
+
+Correctness:
+
+- V8-style baseline `head0@128` vs CPU: PASS, max abs error 0.000030
+- every tested split-Q and split-GQA4 configuration: PASS versus the baseline
+- GPU cross-configuration BF16 differences at the selected larger-context runs were effectively zero
+
+Best measured policy:
+
+| Context | V8/V9 baseline | Best V9 path | Best time/layer | Attention speedup | GPU accounting ceiling |
+|---:|---:|---|---:|---:|---:|
+| 128 | 0.0130 ms | baseline | 0.0130 ms | 1.00x | 188.2 tok/s |
+| 512 | 0.0333 ms | split-Q / 128 | 0.0189 ms | 1.76x | 182.1 tok/s |
+| 1024 | 0.0641 ms | split-Q / 128 | 0.0196 ms | 3.27x | 181.5 tok/s |
+| 2048 | 0.1279 ms | split-Q / 128 | 0.0275 ms | 4.64x | 174.0 tok/s |
+| 4096 | 0.3399 ms | split-GQA4 / 128 | 0.0453 ms | **7.50x** | **159.2 tok/s** |
+
+At context 4096 the 30-layer attention cost falls from roughly 10.2 ms to **1.3597 ms**. The fixed non-attention GPU accounting from V8 is 4.9223 ms, so attention is no longer the dominant cost. The bottleneck has shifted back to the fixed decoder body: 2.1265 ms ternary linears + 1.8712 ms fused support + 0.9166 ms BF16 LM head (plus final norm).
+
+V9's practical dispatch implication is straightforward on this GA102/model pair:
+
+- context <=128: baseline one-block/Q-head path
+- context 512-2048: split-Q with 128-token chunks
+- context ~4096: split-GQA4 with 128-token chunks
+
+These are GPU-kernel accounting ceilings, not measured end-to-end text generation throughput.
