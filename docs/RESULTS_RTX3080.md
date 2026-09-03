@@ -121,3 +121,28 @@ The project now has two distinct best execution modes:
 2. **Multi-column / verification work:** BMMA becomes decisively better when all eight native N columns carry useful activation vectors. The fixed-model weight compiler is essential: the same arithmetic in the wrong row-major layout was unusably slow in V3.
 
 V4 intentionally excluded dynamic B-fragment packing from the timed N=8 kernel. V5 therefore starts from raw signed INT8 `[8,K]` activations, packs them on the GPU with warp ballots into the exact BMMA B-fragment layout, and measures pack time, BMMA time, and the combined end-to-end pipeline separately.
+
+## V5 — dynamic INT8 activation pack + BMMA N=8
+
+Shape: M=8192, K=8192, N=8. Input activations are ordinary signed INT8 `[8,K]`. The fixed weights remain in the offline-compiled GA102 BMMA-native layout. A GPU packing kernel uses `__ballot_sync` to create the exact `uint2/lane` B fragments consumed by `m16n8k256`.
+
+| Stage | Time |
+|---|---:|
+| GPU B-fragment pack | 0.0072 ms |
+| BMMA matrix kernel | 0.0455 ms |
+| Pack + BMMA pipeline | 0.0459 ms |
+
+Pipeline result:
+
+- exact CPU-reference correctness: PASS
+- logical throughput: **11,696.3 GMAC/s (11.696 TMAC/s)**
+- activation pack input: 64.0 KiB
+- packed B output: 64.0 KiB
+- isolated pack effective IO: 18.2 GB/s
+- amortized `0.0459/8 = 0.0057 ms` is throughput-equivalent only, not one-token latency
+
+### V5 interpretation and timing caveat
+
+V5 removes the largest artificial advantage from V4: B fragments are no longer prepacked on the CPU. Starting from normal INT8 activation vectors, the exact GPU pipeline still sustains **11.7 TMAC/s** on the synthetic 8192x8192x8 workload.
+
+The isolated timings are not additive in this run: `0.0072 + 0.0455` is larger than the measured sequential pipeline time `0.0459`. Inspection of the source confirms that the pipeline really launches the pack kernel followed by the BMMA kernel in the same default CUDA stream. The discrepancy is therefore attributed to run-state effects such as GPU boost/cache/timing-order variation, not a missing stage. Consequently, the measured **pipeline total and correctness are accepted**, while the printed `15.7% pack share` should not yet be treated as a precise stage decomposition. A hardened benchmark should measure stage boundaries under the same pipeline state and report repeated-run statistics.
