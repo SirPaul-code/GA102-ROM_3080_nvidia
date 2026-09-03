@@ -11,8 +11,10 @@ set(CMAKE_CUDA_ARCHITECTURES 86 CACHE STRING "CUDA architectures" FORCE)
 
 add_executable(ga102-rom src/main.cu)
 
+set(GA102_PREINCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/preinclude.cuh")
+
 target_compile_options(ga102-rom PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-lineinfo>
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-lineinfo;--pre-include=${GA102_PREINCLUDE}>
 )
 
 if(MSVC)
