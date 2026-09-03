@@ -82,4 +82,42 @@ V3 exposed two mapping mistakes that are particularly important for a fixed-mode
 
 The V3 POPC baseline therefore also regressed from V2's 0.044 ms to 0.345 ms for the same reason. The fair best-known POPC baseline remains the V2 kernel.
 
-V4 addresses these issues by compiling the fixed weights offline into the exact PTX A-fragment order (`uint4` per lane, contiguous per warp), loading each 256-K weight fragment once and reusing it across all eight activation bitplanes. V4 also measures an 8-column path where every native BMMA N=8 output is useful, matching speculative verification / small-batch execution rather than throwing 7/8 of the Tensor Core result away.
+## V4 — BMMA-native fixed weight layout
+
+Shape: M=8192, K=8192. Fixed ternary weights are compiled offline into the exact `m16n8k256` A-fragment order (`uint4` per lane, contiguous per warp). Each 256-K positive/negative weight fragment is loaded once and reused across all eight A8 bitplanes.
+
+### Single-token exact
+
+| Backend | Time | Logical throughput | Physical W rate |
+|---|---:|---:|---:|
+| W1x2 CUDA POPC | 0.040 ms | 1674.9 GMAC/s | 418.7 GB/s |
+| W1x2 BMMA packed | 0.041 ms | 1634.3 GMAC/s | 408.6 GB/s |
+
+- BMMA/POPC speed ratio: **0.98x**
+- exact CPU-reference correctness: PASS
+
+This is a major recovery from V3: once the model weights are stored in the exact GA102-native fragment layout and weight reuse is correct, BMMA is essentially tied with the best single-token POPC path even though seven of its eight N columns are not useful.
+
+### Eight-column exact
+
+| Backend | Time | Logical throughput | Physical W rate |
+|---|---:|---:|---:|
+| W1x2 CUDA POPC x8 | 0.210 ms | 2555.6 GMAC/s | 79.9 GB/s |
+| W1x2 BMMA packed N=8 | 0.033 ms | 16252.0 GMAC/s | 507.9 GB/s |
+
+- BMMA/POPC speed ratio: **6.36x**
+- BMMA instructions/run: 262,144
+- raw b1 rate: 260.03 TOP/s
+- exact CPU-reference correctness: PASS
+- `0.033 / 8 = 0.0041 ms` is an amortized throughput-equivalent number, **not** single-token latency
+
+A useful comparison is eight single-token POPC projections processed sequentially: roughly `8 * 0.040 = 0.320 ms`. The N=8 BMMA kernel performs the eight projections together in **0.033 ms**, about 9.7x less matrix time than that naive sequential path. The fairer weight-reuse software baseline is POPC x8 at 0.210 ms, against which BMMA is 6.36x faster.
+
+### V4 interpretation
+
+The project now has two distinct best execution modes:
+
+1. **Single-token decode:** POPC and BMMA-native are effectively tied at about 1.6–1.7 TMAC/s for this shape. POPC is simpler; BMMA does not provide a meaningful single-token advantage yet.
+2. **Multi-column / verification work:** BMMA becomes decisively better when all eight native N columns carry useful activation vectors. The fixed-model weight compiler is essential: the same arithmetic in the wrong row-major layout was unusably slow in V3.
+
+V4 intentionally excluded dynamic B-fragment packing from the timed N=8 kernel. V5 therefore starts from raw signed INT8 `[8,K]` activations, packs them on the GPU with warp ballots into the exact BMMA B-fragment layout, and measures pack time, BMMA time, and the combined end-to-end pipeline separately.
