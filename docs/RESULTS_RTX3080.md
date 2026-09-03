@@ -49,12 +49,37 @@ Vectorized 512 MiB DRAM read benchmark:
 - 556.3 GB/s measured
 - 73.2% of the 760.1 GB/s property peak
 
-## Interpretation after V2
+### V2 interpretation
 
-The original kernels were primarily mapping / serialization limited, not simply VRAM-bandwidth limited. Converting from one-thread-per-row to one-warp-per-row radically changed all three backends.
+The original kernels were primarily mapping / serialization limited. The important V2 change is not a different ternary approximation: all results remain exact integer dot products. The improvement came from assigning an entire warp to one output row and, for the POPC path, loading each positive/negative weight word once and reusing it across all eight activation bitplanes.
 
-The current fastest exact ternary path is the two one-bit weight masks (`W==+1`, `W==-1`) plus eight signed-A8 activation bitplanes using ordinary CUDA integer `POPC`. It reaches 1.517 TMAC/s logical ternary dot-product throughput on the 8192x8192 test.
+The fastest single-token exact path so far is therefore the two one-bit weight masks (`W==+1`, `W==-1`) plus eight signed-A8 activation bitplanes using ordinary CUDA integer `POPC`: **1.517 TMAC/s** logical ternary throughput on the 8192x8192 test.
 
-The raw 1-bit Tensor Core probe independently demonstrated that GA102 executes `mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popc` at high throughput. V3 therefore maps the same exact ternary arithmetic onto BMMA rather than scalar CUDA `POPC`.
+## V3 — first exact BMMA mapping
 
-No BMMA GEMV speed claim should be made until V3 passes exact CPU-reference correctness on the target GPU.
+Shape: M=8192, K=8192. BMMA tile: `m16n8k256.b1.b1.and.popc`.
+
+| Backend in V3 binary | Time | Logical throughput | Reported one-pass W bytes |
+|---|---:|---:|---:|
+| W1x2 CUDA POPC warp | 0.345 ms | 194.4 GMAC/s | 48.6 GB/s |
+| W1x2 BMMA TensorCore | 3.455 ms | 19.4 GMAC/s | 4.9 GB/s |
+
+Additional BMMA counters:
+
+- 262,144 BMMA instructions/run
+- 2.49 TOP/s raw b1 contributions
+- only 1 of BMMA's 8 N columns was useful; 7/8 were intentionally discarded
+- exact CPU-reference correctness: PASS
+
+### Critical interpretation of V3
+
+The V3 number is **not** evidence that GA102 binary Tensor Cores are intrinsically slow. The raw V1 microarchitectural probe already showed 680.70 TOP/s when operands stayed in registers.
+
+V3 exposed two mapping mistakes that are particularly important for a fixed-model runtime:
+
+1. **Wrong weight memory layout for BMMA.** V3 kept weights row-major and each warp gathered its A fragments from rows separated by the full row stride. The accesses were exact but poorly coalesced.
+2. **Wrong loop order for weight reuse.** V3 iterated activation bitplane outside K-chunk, so the same weight fragment was loaded again for every A8 bitplane. V2 POPC does the opposite: load the weight once, then apply all 8 bitplanes.
+
+The V3 POPC baseline therefore also regressed from V2's 0.044 ms to 0.345 ms for the same reason. The fair best-known POPC baseline remains the V2 kernel.
+
+V4 addresses these issues by compiling the fixed weights offline into the exact PTX A-fragment order (`uint4` per lane, contiguous per warp), loading each 256-K weight fragment once and reusing it across all eight activation bitplanes. V4 also measures an 8-column path where every native BMMA N=8 output is useful, matching speculative verification / small-batch execution rather than throwing 7/8 of the Tensor Core result away.
