@@ -12,6 +12,7 @@ set(CMAKE_CUDA_ARCHITECTURES 86 CACHE STRING "CUDA architectures" FORCE)
 add_executable(ga102-rom src/main.cu)
 add_executable(ga102-rom-v2 src/bench_v2.cu)
 add_executable(ga102-rom-v3 src/bench_v3.cu)
+add_executable(ga102-rom-v4 src/bench_v4.cu)
 
 set(GA102_PREINCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/preinclude.cuh")
 
@@ -27,14 +28,20 @@ target_compile_options(ga102-rom-v3 PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-lineinfo>
 )
 
+target_compile_options(ga102-rom-v4 PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-lineinfo>
+)
+
 if(MSVC)
     target_compile_options(ga102-rom PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
     target_compile_options(ga102-rom-v2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
     target_compile_options(ga102-rom-v3 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
+    target_compile_options(ga102-rom-v4 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
 else()
     target_compile_options(ga102-rom PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
     target_compile_options(ga102-rom-v2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
     target_compile_options(ga102-rom-v3 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
+    target_compile_options(ga102-rom-v4 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
 endif()
 
 set_target_properties(ga102-rom PROPERTIES
@@ -48,6 +55,11 @@ set_target_properties(ga102-rom-v2 PROPERTIES
 )
 
 set_target_properties(ga102-rom-v3 PROPERTIES
+    CUDA_SEPARABLE_COMPILATION OFF
+    CUDA_ARCHITECTURES 86
+)
+
+set_target_properties(ga102-rom-v4 PROPERTIES
     CUDA_SEPARABLE_COMPILATION OFF
     CUDA_ARCHITECTURES 86
 )
