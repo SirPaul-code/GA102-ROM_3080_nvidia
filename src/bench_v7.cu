@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -36,7 +37,7 @@ static constexpr float RMS_EPS = 1.0e-5f;
 
 struct Options {
     int iters = 200;
-    float linear_ms = 2.1265f; // measured V6 RTX 3080 result; override for other runs
+    float linear_ms = 2.1265f;
 };
 
 static Options parse_args(int argc, char** argv) {
@@ -74,6 +75,15 @@ static float time_ms(const std::function<void()>& launch, int warmup, int iters)
     CUDA_CHECK(cudaEventDestroy(a));
     CUDA_CHECK(cudaEventDestroy(b));
     return total / iters;
+}
+
+static float host_bf16_to_float(const bf16& v) {
+    uint16_t hi = 0;
+    std::memcpy(&hi, &v, sizeof(hi));
+    uint32_t bits = (uint32_t)hi << 16;
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
 }
 
 __global__ void init_bf16(bf16* p, size_t n, uint32_t seed) {
@@ -152,7 +162,7 @@ __global__ void quantize_bf16_to_a8(const bf16* __restrict__ x,
     if (tid == 0) *inv_scale = 1.0f / scale;
     for (int i = tid; i < n; i += blockDim.x) {
         int v = __float2int_rn(__bfloat162float(x[i]) * scale);
-        v = max(-128, min(127, v));
+        v = (v < -128) ? -128 : ((v > 127) ? 127 : v);
         q[i] = (int8_t)v;
     }
 }
@@ -187,8 +197,6 @@ __global__ void residual_add_bf16(const bf16* __restrict__ a,
     }
 }
 
-// Decode-step RoPE: 20 Q heads + 5 K heads, head_dim=128.
-// cos/sin for the current position are precomputed, matching a fixed runtime cache.
 __global__ void rope_qk_bf16(bf16* q, bf16* k,
                              const float* __restrict__ c,
                              const float* __restrict__ s) {
@@ -236,8 +244,6 @@ __device__ __forceinline__ float warp_sum_f32(float v) {
     return v;
 }
 
-// Tied BF16 embedding/output projection proxy. One warp owns one vocabulary row.
-// This measures the unavoidable 16-bit weight scan plus dot product for N=1.
 __global__ void lmhead_bf16_warp(const bf16* __restrict__ w,
                                  const bf16* __restrict__ x,
                                  float* __restrict__ logits,
@@ -294,7 +300,7 @@ int main(int argc, char** argv) {
 
         bf16 *dh0=nullptr, *dh1=nullptr, *dhnorm=nullptr;
         bf16 *di0=nullptr, *di1=nullptr, *dinorm=nullptr;
-        bf16 *dq=nullptr, *dk=nullptr;
+        bf16 *dq=nullptr, *dk=nullptr, *dpost=nullptr;
         int8_t *dqh=nullptr, *dqi=nullptr;
         float *dscale=nullptr;
         int32_t *dproj=nullptr;
@@ -308,6 +314,7 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMalloc(&dinorm, INTER*sizeof(bf16)));
         CUDA_CHECK(cudaMalloc(&dq, Q_HEADS*HEAD_DIM*sizeof(bf16)));
         CUDA_CHECK(cudaMalloc(&dk, KV_HEADS*HEAD_DIM*sizeof(bf16)));
+        CUDA_CHECK(cudaMalloc(&dpost, 2*INTER*sizeof(bf16)));
         CUDA_CHECK(cudaMalloc(&dqh, HIDDEN));
         CUDA_CHECK(cudaMalloc(&dqi, INTER));
         CUDA_CHECK(cudaMalloc(&dscale, sizeof(float)));
@@ -348,10 +355,10 @@ int main(int argc, char** argv) {
         const float residual_ms=time_ms(res_launch,20,o.iters);
         const float rope_ms=time_ms(rope_launch,20,o.iters);
 
-        const float post_qkv=bench_post(dproj,(bf16*)dq,3840,o.iters);
-        const float post_o=bench_post(dproj,dh1,2560,o.iters);
-        const float post_gu=bench_post(dproj,di1,13824,o.iters);
-        const float post_down=bench_post(dproj,dh1,2560,o.iters);
+        const float post_qkv=bench_post(dproj,dpost,3840,o.iters);
+        const float post_o=bench_post(dproj,dpost,2560,o.iters);
+        const float post_gu=bench_post(dproj,dpost,13824,o.iters);
+        const float post_down=bench_post(dproj,dpost,2560,o.iters);
 
         std::cout << "\n=== V7 per-token primitive timings ===\n"
                   << std::setprecision(4)
@@ -367,22 +374,18 @@ int main(int argc, char** argv) {
                   << "postscale gate+up 13824    : " << post_gu << " ms\n"
                   << "postscale down 2560        : " << post_down << " ms\n";
 
-        // Launch-separated accounting. A fixed runtime should fuse several of these,
-        // so this is deliberately a conservative decomposition, not a lower bound.
         const double layer_aux =
             3.0*rms_h + rms_i +
             3.0*q_h + q_i +
             rope_ms + relu_ms + 2.0*residual_ms +
             post_qkv + post_o + post_gu + post_down;
-        const double aux30 = layer_aux*LAYERS + rms_h; // final model RMSNorm
+        const double aux30 = layer_aux*LAYERS + rms_h;
 
         std::cout << "\nlaunch-separated auxiliary/layer : " << layer_aux << " ms\n"
                   << "launch-separated auxiliary/30L  : " << aux30 << " ms\n"
                   << "note: many of these stages are intentionally fusable in the fixed runtime.\n";
 
-        // KV traffic floor: BF16 K+V, 5 KV heads, 128 dims, all 30 layers.
-        // Each token/layer = 2(K,V)*5*128*2 bytes = 2560 bytes.
-        const size_t vecs_per_token = (2ull*KV_HEADS*HEAD_DIM*sizeof(bf16))/sizeof(uint4); // 160
+        const size_t vecs_per_token = (2ull*KV_HEADS*HEAD_DIM*sizeof(bf16))/sizeof(uint4);
         const size_t max_vecs_layer = (size_t)MAX_CTX*vecs_per_token;
         const size_t kv_vecs = (size_t)LAYERS*max_vecs_layer;
         uint4* dkv=nullptr;
@@ -414,7 +417,6 @@ int main(int argc, char** argv) {
                       << std::setprecision(1) << gbps << " GB/s aggregate\n";
         }
 
-        // Tied BF16 LM head / embedding: 128256 x 2560 = 626.25 MiB.
         const size_t lm_values=(size_t)VOCAB*HIDDEN;
         const size_t lm_bytes=lm_values*sizeof(bf16);
         bf16* dlmw=nullptr;
@@ -429,7 +431,6 @@ int main(int argc, char** argv) {
         auto lm_launch=[&]{lmhead_bf16_warp<<<lm_blocks,lm_threads>>>(dlmw,dh0,dlogits,VOCAB,HIDDEN);};
 
         lm_launch(); CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
-        // Small CPU cross-check for the first four rows.
         std::vector<bf16> hw4((size_t)4*HIDDEN), hx(HIDDEN);
         std::vector<float> gl4(4);
         CUDA_CHECK(cudaMemcpy(hw4.data(),dlmw,hw4.size()*sizeof(bf16),cudaMemcpyDeviceToHost));
@@ -439,7 +440,7 @@ int main(int argc, char** argv) {
         for(int r=0;r<4;++r){
             double ref=0.0;
             for(int j=0;j<HIDDEN;++j)
-                ref+=(double)__bfloat162float(hw4[(size_t)r*HIDDEN+j])*(double)__bfloat162float(hx[j]);
+                ref+=(double)host_bf16_to_float(hw4[(size_t)r*HIDDEN+j])*(double)host_bf16_to_float(hx[j]);
             const double err=std::fabs((double)gl4[r]-ref);
             if(err>1.0e-2*std::max(1.0,std::fabs(ref))){lm_ok=false;break;}
         }
@@ -478,8 +479,9 @@ int main(int argc, char** argv) {
 
         CUDA_CHECK(cudaFree(dh0)); CUDA_CHECK(cudaFree(dh1)); CUDA_CHECK(cudaFree(dhnorm));
         CUDA_CHECK(cudaFree(di0)); CUDA_CHECK(cudaFree(di1)); CUDA_CHECK(cudaFree(dinorm));
-        CUDA_CHECK(cudaFree(dq)); CUDA_CHECK(cudaFree(dk)); CUDA_CHECK(cudaFree(dqh)); CUDA_CHECK(cudaFree(dqi));
-        CUDA_CHECK(cudaFree(dscale)); CUDA_CHECK(cudaFree(dproj)); CUDA_CHECK(cudaFree(dcos)); CUDA_CHECK(cudaFree(dsin));
+        CUDA_CHECK(cudaFree(dq)); CUDA_CHECK(cudaFree(dk)); CUDA_CHECK(cudaFree(dpost));
+        CUDA_CHECK(cudaFree(dqh)); CUDA_CHECK(cudaFree(dqi)); CUDA_CHECK(cudaFree(dscale));
+        CUDA_CHECK(cudaFree(dproj)); CUDA_CHECK(cudaFree(dcos)); CUDA_CHECK(cudaFree(dsin));
         CUDA_CHECK(cudaFree(dkv)); CUDA_CHECK(cudaFree(dsink)); CUDA_CHECK(cudaFree(dlmw)); CUDA_CHECK(cudaFree(dlogits));
 
         std::cout << "\nV7 completed.\n";
