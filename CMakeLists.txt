@@ -52,6 +52,10 @@ target_compile_options(ga102-rom-v8 PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-lineinfo>
 )
 
+# CUDA 13.x no longer exposes CUDART_INF_F through the headers used by V8.
+# The attention reduction only needs a finite sentinel below every real score.
+target_compile_definitions(ga102-rom-v8 PRIVATE CUDART_INF_F=3.402823466e+38F)
+
 if(MSVC)
     target_compile_options(ga102-rom PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
     target_compile_options(ga102-rom-v2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
