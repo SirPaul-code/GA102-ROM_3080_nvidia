@@ -1,0 +1,9 @@
+build/
+out/
+results/
+*.log
+*.csv
+*.nsys-rep
+*.ncu-rep
+.vs/
+.vscode/
