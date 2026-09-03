@@ -146,3 +146,44 @@ Pipeline result:
 V5 removes the largest artificial advantage from V4: B fragments are no longer prepacked on the CPU. Starting from normal INT8 activation vectors, the exact GPU pipeline still sustains **11.7 TMAC/s** on the synthetic 8192x8192x8 workload.
 
 The isolated timings are not additive in this run: `0.0072 + 0.0455` is larger than the measured sequential pipeline time `0.0459`. Inspection of the source confirms that the pipeline really launches the pack kernel followed by the BMMA kernel in the same default CUDA stream. The discrepancy is therefore attributed to run-state effects such as GPU boost/cache/timing-order variation, not a missing stage. Consequently, the measured **pipeline total and correctness are accepted**, while the printed `15.7% pack share` should not yet be treated as a precise stage decomposition. A hardened benchmark should measure stage boundaries under the same pipeline state and report repeated-run statistics.
+
+## V6 — real BitNet b1.58 2B-4T projection shapes
+
+V6 replaces the synthetic 8192x8192 matrix with the actual decoder projection dimensions of `microsoft/bitnet-b1.58-2B-4T`. The fixed runtime fuses Q/K/V into one `3840x2560` projection and gate/up into one `13824x2560` projection. To reduce L2-hot benchmark artifacts, each shape rotates through approximately 64 MiB of equivalent packed weight copies.
+
+All single-token and N=8 results passed exact CPU-reference validation.
+
+| Projection | Shape MxK | Packed W | Single pack+POPC | Single GMAC/s | N=8 pack+BMMA | N=8 GMAC/s |
+|---|---:|---:|---:|---:|---:|---:|
+| fused QKV | 3840x2560 | 2.344 MiB | 0.0170 ms | 576.7 | 0.0171 ms | 4600.2 |
+| attention O | 2560x2560 | 1.562 MiB | 0.0136 ms | 481.7 | 0.0181 ms | 2890.2 |
+| fused gate+up | 13824x2560 | 8.438 MiB | 0.0234 ms | 1513.2 | 0.0197 ms | 14392.5 |
+| MLP down | 2560x6912 | 4.219 MiB | 0.0168 ms | 1050.2 | 0.0247 ms | 5738.5 |
+
+Matrix-only physical weight-read observations:
+
+- fused QKV single: 180.3 GB/s
+- attention O single: 135.9 GB/s
+- fused gate+up single: 424.4 GB/s
+- MLP down single: 390.8 GB/s
+- N=8 matrix paths vary from 156.9 to 348.7 GB/s for these smaller real shapes
+
+Aggregate decoder-linears result:
+
+- packed ternary W per layer: **16.562 MiB**
+- packed ternary W for 30 layers: **496.875 MiB**
+- logical ternary MAC/token: **2,084,044,800**
+- single-token linear time/layer: **0.0709 ms**
+- single-token 30-layer linears: **2.1265 ms**
+- single-token linear-only ceiling: **470.3 token/s**
+- N=8 linears/layer: **0.0796 ms for 8 states**
+- N=8 30-layer linears: **2.3873 ms for 8 states**
+- N=8 linear-only throughput: **3351.1 states/s**
+
+### V6 interpretation
+
+V6 is the first benchmark that maps the custom kernels onto the actual model's decoder shapes. The large MLP projections are already relatively close to the memory-throughput regime, while QKV/O are small enough that launch, occupancy and fixed overhead matter much more than the raw 760 GB/s property bandwidth.
+
+The **470.3 token/s** number is explicitly a 30-layer ternary-linear ceiling, not end-to-end model throughput. V6 starts from raw signed A8 inputs and includes the dynamic bitplane/B-fragment packing used by the matrix kernels, but it still excludes BF16-to-A8 activation quantization, RMSNorm/subnorms, RoPE, KV-cache attention, ReLU2/gating, residuals, the final norm, tied LM head, sampling and runtime dependencies.
+
+Similarly, **3351.1 states/s** is N=8 linear verification throughput. It must not be interpreted as 3351 autoregressive generated tokens/s.
