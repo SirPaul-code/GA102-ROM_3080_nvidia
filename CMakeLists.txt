@@ -24,6 +24,7 @@ add_executable(ga102-rom-v12 src/bench_v12.cu)
 add_executable(ga102-rom-v13 src/bench_v13_fixed.cu)
 add_executable(ga102-rom-v14 src/bench_v14.cu)
 add_executable(ga102-rom-v15 src/bench_v15.cu)
+add_executable(ga102-rom-v16 src/bench_v16.cu)
 
 set(GA102_PREINCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/preinclude.cuh")
 
@@ -87,6 +88,10 @@ target_compile_options(ga102-rom-v15 PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-lineinfo>
 )
 
+target_compile_options(ga102-rom-v16 PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-lineinfo>
+)
+
 # CUDA 13.x no longer exposes CUDART_INF_F through the headers used by V8.
 # The attention reduction only needs a finite sentinel below every real score.
 target_compile_definitions(ga102-rom-v8 PRIVATE CUDART_INF_F=3.402823466e+38F)
@@ -107,6 +112,7 @@ if(MSVC)
     target_compile_options(ga102-rom-v13 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
     target_compile_options(ga102-rom-v14 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
     target_compile_options(ga102-rom-v15 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
+    target_compile_options(ga102-rom-v16 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/O2>)
 else()
     target_compile_options(ga102-rom PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
     target_compile_options(ga102-rom-v2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
@@ -123,6 +129,7 @@ else()
     target_compile_options(ga102-rom-v13 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
     target_compile_options(ga102-rom-v14 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
     target_compile_options(ga102-rom-v15 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
+    target_compile_options(ga102-rom-v16 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
 endif()
 
 set_target_properties(ga102-rom PROPERTIES CUDA_SEPARABLE_COMPILATION OFF CUDA_ARCHITECTURES 86)
@@ -140,3 +147,4 @@ set_target_properties(ga102-rom-v12 PROPERTIES CUDA_SEPARABLE_COMPILATION OFF CU
 set_target_properties(ga102-rom-v13 PROPERTIES CUDA_SEPARABLE_COMPILATION OFF CUDA_ARCHITECTURES 86)
 set_target_properties(ga102-rom-v14 PROPERTIES CUDA_SEPARABLE_COMPILATION OFF CUDA_ARCHITECTURES 86)
 set_target_properties(ga102-rom-v15 PROPERTIES CUDA_SEPARABLE_COMPILATION OFF CUDA_ARCHITECTURES 86)
+set_target_properties(ga102-rom-v16 PROPERTIES CUDA_SEPARABLE_COMPILATION OFF CUDA_ARCHITECTURES 86)
