@@ -1,6 +1,7 @@
-#define main ga102_rom_v18_embedded_main
-#include "bench_v18.cu"
+#define main ga102_rom_v17_embedded_main
+#include "bench_v17.cu"
 #undef main
+#include "bench_v18lib.cuh"
 
 // V19 attacks the next limit exposed by V18: physical decoder-weight traffic.
 // V18 stores exact ternary weights as two one-bit masks (P/N) = 2.000 bits/W.
@@ -400,9 +401,6 @@ int main(int argc, char** argv) {
         cudaStream_t s = nullptr;
         CUDA_CHECK(cudaStreamCreate(&s));
 
-        // Re-sweep V18 in this process. Do not inherit choices or timings from
-        // a prior run because WDDM/boost state caused large cross-run drift in
-        // V16/V17.
         std::cout << "\n=== V19 fresh V18 split-K sweep ===\n";
         std::cout << "\nQKV\n";
         const Choice18 bq = sweep_split18(qkv, ph, oq, s, opt.rounds, opt.batch);
