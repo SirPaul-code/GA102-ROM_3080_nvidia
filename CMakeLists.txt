@@ -21,7 +21,7 @@ add_executable(ga102-rom-v9 src/bench_v9.cu)
 add_executable(ga102-rom-v10 src/bench_v10.cu)
 add_executable(ga102-rom-v11 src/bench_v11.cu)
 add_executable(ga102-rom-v12 src/bench_v12.cu)
-add_executable(ga102-rom-v13 src/bench_v13.cu)
+add_executable(ga102-rom-v13 src/bench_v13_fixed.cu)
 
 set(GA102_PREINCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/preinclude.cuh")
 
