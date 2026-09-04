@@ -48,6 +48,15 @@ struct DiffInfo {
     double max_abs = 0.0;
 };
 
+static float host_bf16_v14(const bf16& v) {
+    uint16_t hi = 0;
+    std::memcpy(&hi, &v, sizeof(hi));
+    uint32_t bits = (uint32_t)hi << 16;
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
 static DiffInfo compare_u32(const uint32_t* a, const uint32_t* b, size_t n) {
     std::vector<uint32_t> ha(n), hb(n);
     CUDA_CHECK(cudaMemcpy(ha.data(), a, n * sizeof(uint32_t), cudaMemcpyDeviceToHost));
@@ -78,8 +87,8 @@ static DiffInfo compare_bf16(const bf16* a, const bf16* b, size_t n) {
     CUDA_CHECK(cudaMemcpy(hb.data(), b, n * sizeof(bf16), cudaMemcpyDeviceToHost));
     DiffInfo d;
     for (size_t i = 0; i < n; ++i) {
-        const float fa = __bfloat162float(ha[i]);
-        const float fb = __bfloat162float(hb[i]);
+        const float fa = host_bf16_v14(ha[i]);
+        const float fb = host_bf16_v14(hb[i]);
         const double e = std::fabs((double)fa - (double)fb);
         if (e > d.max_abs) { d.max_abs = e; d.index = i; }
         uint16_t ua = 0, ub = 0;
